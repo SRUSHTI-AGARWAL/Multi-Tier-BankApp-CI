@@ -1,0 +1,143 @@
+// Jenkins Pipeline
+pipeline {
+    agent any
+    tools{
+        maven 'maven3'
+    }
+    
+    parameters{
+       string(name: 'DOCKER_TAG' , defaultValue: 'latest', description: 'Docker tag' )
+    }
+    environment {
+        SCANNER_HOME = tool 'sonar-scanner'
+    }
+    stages {
+     
+        // stage("Clean Workspace"){
+        //     steps{
+        //         cleanWs()
+        //     }
+            
+        // }
+     
+     
+        stage('Git Checkout') {
+            steps {
+                git branch: 'main', credentialsId: 'github-cred', url: 'https://github.com/SRUSHTI-AGARWAL/Multi-Tier-BankApp-CI.git'
+            }
+        }
+        
+        stage('Compile') {
+            steps {
+                  sh "mvn compile"
+            }
+        }
+        
+        stage('test') {
+            steps {
+                sh "mvn test -DskipTests=true"
+             }
+        }
+        
+        stage('file System Scan') {
+            steps {
+                 sh "trivy fs --format table -o fs.html ."
+                
+            }
+        }
+        
+        stage('Sonar Analysis') {
+            steps {
+                
+                withSonarQubeEnv('sonar-server') 
+                {
+                    //   refers to URL also ,credentials also 
+                    // execute shell commands to run scanner
+                    sh ''' $SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=bankapp -Dsonar.projectKey=bankapp -Dsonar.java.binaries=target'''
+                }
+            }
+        }
+        
+        
+        // build app , generate artifact, publish to Nexus
+        stage('Build & Publish Nexus') {
+            steps {
+                withMaven(globalMavenSettingsConfig: 'maven-settings-srushti', jdk: '', maven: 'maven3', mavenSettingsConfig: '', traceability: true) {
+                             sh 'mvn deploy -DskipTests=true'
+}
+            }
+        }
+        
+         stage('docker build and Tag') {
+            // docker comamnds need to be run in a script 
+            steps {
+                script{withDockerRegistry(credentialsId: 'docker-cred') {
+                      sh "docker build -t imsrushti/bankapp:${params.DOCKER_TAG} ."   
+                }
+                    
+                }
+            }
+        }
+        
+        stage('Docker Image Scan') {
+            steps {
+                 sh "trivy image  --format table -o dimage.html imsrushti/bankapp:${params.DOCKER_TAG}"
+                
+            }
+        }
+        
+        stage('docker image push') {
+            // docker comamnds need to be run in a script 
+            steps {
+                script{withDockerRegistry(credentialsId: 'docker-cred') {
+                      sh "docker push imsrushti/bankapp:${params.DOCKER_TAG}"
+                      
+                      }
+                    
+                }
+            }
+        }
+        
+        stage("Update YAML Manifests in CD repo")
+        {
+            steps{ 
+               script{
+                   withCredentials([gitUsernamePassword(credentialsId: 'github-cred', gitToolName: 'Default')]) { 
+                       
+                    //   Clone Repo, list files,replace pattern using sed ( specified editor)
+                       sh '''
+                       rm -rf Multi-Tier-BankApp-CD
+                       git clone https://github.com/SRUSHTI-AGARWAL/Multi-Tier-BankApp-CD.git 
+                       cd Multi-Tier-BankApp-CD
+                       ls -l bankapp
+                       repo_dir=$(pwd)
+                       sed -i 's|image: imsrushti/bankapp:.*|image: imsrushti/bankapp:'"${DOCKER_TAG}"'|' ${repo_dir}/bankapp/bankapp-ds.yml
+
+                    '''
+                    
+                    sh '''
+                    echo "Updated YAML file contents"
+                    cat Multi-Tier-BankApp-CD/bankapp/bankapp-ds.yml
+                     '''
+                    //  configure git for committing changes and pushing
+                    sh '''
+                    cd Multi-Tier-BankApp-CD
+                    git config user.email "ssd125agarwal@gmail.com"
+                    git config user.name "SRUSHTI-AGARWAL"
+                    '''
+                    // Commit and push the updated YAML file back to CD repo
+                    sh '''
+                    cd Multi-Tier-BankApp-CD
+                    ls 
+                    git add bankapp/bankapp-ds.yml
+                    git commit -m "Update images to ${DOCKER_TAG}"
+                    git push origin main
+                    '''
+                    
+                   }
+               } 
+            }
+            }       
+         
+    }
+}
